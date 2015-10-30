@@ -46,6 +46,7 @@
 #include <systemlib/ppm_decode.h>
 #include <rc/st24.h>
 #include <rc/sumd.h>
+#include <rc/srxl.h>
 
 #include "px4io.h"
 
@@ -54,7 +55,7 @@
 #define RC_CHANNEL_LOW_THRESH		-8000	/* 10% threshold */
 
 static bool	ppm_input(uint16_t *values, uint16_t *num_values, uint16_t *frame_len);
-static bool	dsm_port_input(uint16_t *rssi, bool *dsm_updated, bool *st24_updated, bool *sumd_updated);
+static bool	dsm_port_input(uint16_t *rssi, bool *dsm_updated, bool *st24_updated, bool *sumd_updated, bool *srxl_updated);
 
 static perf_counter_t c_gather_dsm;
 static perf_counter_t c_gather_sbus;
@@ -64,7 +65,7 @@ static int _dsm_fd;
 
 static uint16_t rc_value_override = 0;
 
-bool dsm_port_input(uint16_t *rssi, bool *dsm_updated, bool *st24_updated, bool *sumd_updated)
+bool dsm_port_input(uint16_t *rssi, bool *dsm_updated, bool *st24_updated, bool *sumd_updated, bool *srxl_updated)
 {
 	perf_begin(c_gather_dsm);
 	uint16_t temp_count = r_raw_rc_count;
@@ -134,12 +135,36 @@ bool dsm_port_input(uint16_t *rssi, bool *dsm_updated, bool *st24_updated, bool 
 		r_raw_rc_flags &= ~(PX4IO_P_RAW_RC_FLAGS_FAILSAFE);
 	}
 
-	return (*dsm_updated | *st24_updated | *sumd_updated);
+	/* get data from FD and attempt to parse with SRXL libs */
+	uint8_t srxl_rssi, srxl_rx_count;
+	uint16_t srxl_channel_count = 0;
+
+	*srxl_updated = false;
+
+	for (unsigned i = 0; i < n_bytes; i++) {
+		/* set updated flag if one complete packet was parsed */
+		srxl_rssi = RC_INPUT_RSSI_MAX;
+		*srxl_updated |= (OK == srxl_decode(bytes[i], &srxl_rssi, &srxl_rx_count,
+					&srxl_channel_count, r_raw_rc_values, PX4IO_RC_INPUT_CHANNELS));
+	}
+
+	if (*srxl_updated) {
+
+		/* not setting RSSI since SRXL does not provide one */
+		r_raw_rc_count = srxl_channel_count;
+
+		r_status_flags |= PX4IO_P_STATUS_FLAGS_RC_SRXL;
+		r_raw_rc_flags &= ~(PX4IO_P_RAW_RC_FLAGS_FRAME_DROP);
+		r_raw_rc_flags &= ~(PX4IO_P_RAW_RC_FLAGS_FAILSAFE);
+	}
+
+	return (*dsm_updated | *st24_updated | *sumd_updated | *srxl_updated);
 }
 
 void
 controls_init(void)
 {
+    
 	/* no channels */
 	r_raw_rc_count = 0;
 	system_state.rc_channels_timestamp_received = 0;
@@ -205,8 +230,8 @@ controls_tick() {
 	}
 
 	perf_begin(c_gather_dsm);
-	bool dsm_updated, st24_updated, sumd_updated;
-	(void)dsm_port_input(&rssi, &dsm_updated, &st24_updated, &sumd_updated);
+	bool dsm_updated, st24_updated, sumd_updated, srxl_updated;
+	(void)dsm_port_input(&rssi, &dsm_updated, &st24_updated, &sumd_updated, &srxl_updated);
 	if (dsm_updated) {
 		r_status_flags |= PX4IO_P_STATUS_FLAGS_RC_DSM;
 	}
@@ -216,6 +241,9 @@ controls_tick() {
 	if (sumd_updated) {
 		r_status_flags |= PX4IO_P_STATUS_FLAGS_RC_SUMD;
 	}
+    	if (srxl_updated) {
+   	     	r_status_flags |= PX4IO_P_STATUS_FLAGS_RC_SRXL;
+    	}
 	perf_end(c_gather_dsm);
 
 	perf_begin(c_gather_sbus);
@@ -281,7 +309,7 @@ controls_tick() {
 	/*
 	 * If we received a new frame from any of the RC sources, process it.
 	 */
-	if (dsm_updated || sbus_updated || ppm_updated || st24_updated || sumd_updated) {
+	if (dsm_updated || sbus_updated || ppm_updated || st24_updated || sumd_updated || srxl_updated) {
 
 		/* record a bitmask of channels assigned */
 		unsigned assigned_channels = 0;
@@ -358,7 +386,7 @@ controls_tick() {
 					if (mapped == 3 && r_setup_rc_thr_failsafe) {
 						/* throttle failsafe detection */
 						if (((raw < conf[PX4IO_P_RC_CONFIG_MIN]) && (raw < r_setup_rc_thr_failsafe)) ||
-						    ((raw > conf[PX4IO_P_RC_CONFIG_MAX]) && (raw > r_setup_rc_thr_failsafe))) {
+							((raw > conf[PX4IO_P_RC_CONFIG_MAX]) && (raw > r_setup_rc_thr_failsafe))) {
 							r_raw_rc_flags |= PX4IO_P_RAW_RC_FLAGS_FAILSAFE;
 						} else {
 							r_raw_rc_flags &= ~(PX4IO_P_RAW_RC_FLAGS_FAILSAFE);
@@ -410,6 +438,7 @@ controls_tick() {
 		r_status_flags &= ~(
 			PX4IO_P_STATUS_FLAGS_RC_PPM |
 			PX4IO_P_STATUS_FLAGS_RC_DSM |
+            		PX4IO_P_STATUS_FLAGS_RC_SRXL |
 			PX4IO_P_STATUS_FLAGS_RC_SBUS);
 
 	}
@@ -481,7 +510,7 @@ controls_tick() {
 			r_status_flags |= PX4IO_P_STATUS_FLAGS_OVERRIDE;
 
 			/* mix new RC input control values to servos */
-			if (dsm_updated || sbus_updated || ppm_updated || st24_updated || sumd_updated)
+			if (dsm_updated || sbus_updated || ppm_updated || st24_updated || sumd_updated || srxl_updated)
 				mixer_tick();
 
 		} else {
