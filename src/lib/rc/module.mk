@@ -34,9 +34,11 @@
 #
 # Yuntec ST24 transmitter protocol decoder
 # Graupnet HoTT transmitter protocol decoder
+# Multiplex SRXL transmitter protocol decoder
 #
 
 SRCS		 =	st24.c \
-				sumd.c
+			sumd.c \
+			xbus.c
 
 MAXOPTIMIZATION	 = -Os
